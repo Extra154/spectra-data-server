@@ -38,7 +38,7 @@ router.post("/", async (req, res) => {
   if (!chatName || !message) return res.status(400).json({ error: "Missing chatName or message" });
 
   try {
-    const chatRef = db.ref(chats/${chatName}/messages);
+    const chatRef = db.ref(`chats/${chatName}/messages`);
     const newMsgRef = chatRef.push();
 
     // Ensure all columns are included
@@ -63,7 +63,7 @@ router.get("/:chatName", async (req, res) => {
   const chatName = req.params.chatName;
 
   try {
-    const snapshot = await db.ref(chats/${chatName}/messages).once("value");
+    const snapshot = await db.ref(`chats/${chatName}/messages`).once("value");
     const messages = [];
     snapshot.forEach(snap => {
       messages.push({ id: snap.key, ...snap.val() });
@@ -86,7 +86,7 @@ router.post("/sync", async (req, res) => {
   if (!chatName) return res.status(400).json({ error: "Missing chatName" });
 
   try {
-    const chatRef = db.ref(chats/${chatName}/messages);
+    const chatRef = db.ref(`chats/${chatName}/messages`);
     const snapshot = await chatRef.once("value");
 
     // If chat does NOT exist → create it
@@ -124,7 +124,7 @@ router.post("/push", async (req, res) => {
   }
 
   try {
-    const chatRef = db.ref(chats/${chatName}/messages);
+    const chatRef = db.ref(`chats/${chatName}/messages`);
 
     for (const msg of messages) {
       const dataToPush = {};
@@ -143,4 +143,5 @@ router.post("/push", async (req, res) => {
 });
 
 module.exports = router;
+
 
