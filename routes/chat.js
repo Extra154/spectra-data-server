@@ -30,4 +30,41 @@ router.get("/:chatId", async (req, res) => {
   }
 });
 
+
 module.exports = router;
+
+router.post("/sync", async (req, res) => {
+  const { chatName, lastLocalTime } = req.body;
+
+  if (!chatName) {
+    return res.status(400).json({ error: "Missing chatName" });
+  }
+
+  try {
+    const chatRef = db.ref(chats/${chatName});
+    const snapshot = await chatRef.once("value");
+
+    // 1️⃣ If chat does NOT exist → create it
+    if (!snapshot.exists()) {
+      await chatRef.set({ messages: {} });
+      return res.json({ messages: [], created: true });
+    }
+
+    // 2️⃣ Chat exists → fetch newer messages
+    const msgSnap = await chatRef
+      .child("messages")
+      .orderByChild("time")
+      .startAfter(lastLocalTime || 0)
+      .once("value");
+
+    const messages = [];
+    msgSnap.forEach(snap => {
+      messages.push({ id: snap.key, ...snap.val() });
+    });
+
+    res.json({ messages, created: false });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
