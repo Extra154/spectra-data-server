@@ -34,10 +34,38 @@ router.post("/", async (req, res) => {
       caption,
       time,
       songPlayed,
-      likes: likes || 0
+      likes: likes || 0,
+      viewers: []   // 👈 initialize viewers
     });
 
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Add viewer to a story
+ */
+router.post("/view", async (req, res) => {
+  const { storyId, viewer } = req.body;
+
+  if (!storyId || !viewer) {
+    return res.status(400).json({ error: "Missing storyId or viewer" });
+  }
+
+  try {
+    const viewersRef = db.ref(stories/${storyId}/viewers);
+    const snapshot = await viewersRef.once("value");
+
+    let viewers = snapshot.val() || [];
+
+    if (!viewers.includes(viewer)) {
+      viewers.push(viewer);
+      await viewersRef.set(viewers);
+    }
+
+    res.json({ success: true, viewers });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
