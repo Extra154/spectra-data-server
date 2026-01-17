@@ -69,14 +69,20 @@ function serverTime() {
  */
 app.get('/providers', (req, res) => {
     const updatedAfter = Number(req.query.updated_after || 0);
+    const location = req.query.location; // Get location from Android request
 
-    const sql = `
-        SELECT * FROM service_providers
-        WHERE updated_at > ?
-        ORDER BY updated_at ASC
-    `;
+    let sql = SELECT * FROM service_providers WHERE updated_at > ?;
+    let params = [updatedAfter];
 
-    db.all(sql, [updatedAfter], (err, rows) => {
+    // If a location is provided (e.g., "Waterfalls"), filter the results
+    if (location) {
+        sql += ` AND location LIKE ?`;
+        params.push(%${location}%);
+    }
+
+    sql += ` ORDER BY updated_at ASC`;
+
+    db.all(sql, params, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
 
         res.json({
