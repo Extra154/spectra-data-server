@@ -1,218 +1,192 @@
 const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
 const db = require("../firebaseService"); // admin.database()
+const bcrypt = require("bcryptjs");
 
-/* =====================================================
-   HELPER: REMOVE SENSITIVE FIELDS
-   ===================================================== */
-function sanitizeUser(user) {
-  if (!user) return null;
-  const { password, ...safeUser } = user;
-  return safeUser;
-}
-
-/* =====================================================
-   CREATE / UPDATE USER
-   ===================================================== */
+// -----------------------
+// CREATE OR UPDATE USER
+// -----------------------
 router.post("/", async (req, res) => {
-  const user = req.body;
-
-  if (!user.username || !user.password) {
-    return res.status(400).json({ error: "Missing username or password" });
-  }
+  const user = req.body; // Should match UserResponse fields
+  if (!user.username) return res.status(400).json({ error: "Missing username" });
 
   try {
-    const hashedPassword = await bcrypt.hash(user.password, 10);
+    // Hash password if provided
+    if (user.password) {
+      const salt = await bcrypt.genSalt(10);
+      user.password = await bcrypt.hash(user.password, salt);
+    }
 
-    const userData = {
+    // Save or update user under users/{username}
+    await db.ref(users/${user.username}).update({
       ...user,
-      password: hashedPassword,
-      isOnline: !!user.isOnline,
-      updatedAt: Date.now()
-    };
+      updatedAt: Date.now(), // always update timestamp
+    });
 
-    await db.ref(users/${user.username}).set(userData);
-    res.json({ success: true, user: sanitizeUser(userData) });
+    res.json({ success: true, user: { ...user, password: undefined } });
   } catch (err) {
-    console.error("USER SAVE ERROR:", err);
+    console.error(err);
     res.status(500).json({ error: "Failed to create/update user" });
   }
 });
 
-/* =====================================================
-   GET USER BY USERNAME (SAFE)
-   ===================================================== */
+// -----------------------
+// GET USER BY USERNAME
+// -----------------------
 router.get("/:username", async (req, res) => {
   try {
     const snapshot = await db.ref(users/${req.params.username}).once("value");
-    if (!snapshot.exists()) {
-      return res.status(404).json({ error: "User not found" });
-    }
-    res.json(sanitizeUser(snapshot.val()));
+    if (!snapshot.exists()) return res.status(404).json({ error: "User not found" });
+
+    const user = snapshot.val();
+    const { password, ...safeUser } = user;
+    res.json(safeUser);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to fetch user" });
   }
 });
 
-/* =====================================================
-   FOLLOW USER
-   ===================================================== */
+// -----------------------
+// FOLLOW A USER
+// -----------------------
 router.post("/follow", async (req, res) => {
   const { follower, followed } = req.body;
-
-  if (!follower || !followed || follower === followed) {
-    return res.status(400).json({ error: "Invalid follow request" });
-  }
+  if (!follower || !followed) return res.status(400).json({ error: "Missing follower/followed" });
 
   try {
     await db.ref(followers/${follower}/${followed}).set(Date.now());
     res.json({ success: true });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Follow failed" });
   }
 });
 
-/* =====================================================
-   UNFOLLOW USER
-   ===================================================== */
+// -----------------------
+// UNFOLLOW A USER
+// -----------------------
 router.post("/unfollow", async (req, res) => {
   const { follower, followed } = req.body;
+  if (!follower || !followed) return res.status(400).json({ error: "Missing follower/followed" });
 
   try {
     await db.ref(followers/${follower}/${followed}).remove();
     res.json({ success: true });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Unfollow failed" });
   }
 });
 
-/* =====================================================
-   CHECK FOLLOW STATUS
-   ===================================================== */
-router.get("/isFollowing/:follower/:followed", async (req, res) => {
-  const { follower, followed } = req.params;
-
+// -----------------------
+// GET FOLLOWING FOR USER
+// -----------------------
+router.get("/:username/following", async (req, res) => {
   try {
-    const snap = await db.ref(followers/${follower}/${followed}).once("value");
-    res.json({ isFollowing: snap.exists() });
+    const snapshot = await db.ref(followers/${req.params.username}).once("value");
+    res.json(snapshot.val() || {});
   } catch (err) {
-    res.status(500).json({ error: "Failed to check follow status" });
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch following" });
   }
 });
 
-/* =====================================================
-   MUTUAL CONTACTS (SANITIZED)
-   ===================================================== */
-router.get("/:username/mutual", async (req, res) => {
-  const myUsername = req.params.username;
+// -----------------------
+// MUTUAL CONTACTS
+// -----------------------
+router.get("/:username/mutuals", async (req, res) => {
+  const username = req.params.username;
 
   try {
-    const myFollowingSnap = await db.ref(followers/${myUsername}).once("value");
-    const myFollowing = myFollowingSnap.val() || {};
-    const followingList = Object.keys(myFollowing);
+    const followingSnap = await db.ref(followers/${username}).once("value");
+    const following = followingSnap.exists() ? Object.keys(followingSnap.val()) : [];
 
-    const mutualChecks = followingList.map(async user => {
-      const mutualSnap = await db.ref(followers/${user}/${myUsername}).once("value");
-      if (!mutualSnap.exists()) return null;
+    // Check who follows me back
+    const mutuals = [];
+    await Promise.all(following.map(async (f) => {
+      const theirFollowingSnap = await db.ref(followers/${f}/${username}).once("value");
+      if (theirFollowingSnap.exists()) {
+        const userSnap = await db.ref(users/${f}).once("value");
+        if (userSnap.exists()) {
+          const { password, ...safeUser } = userSnap.val();
+          mutuals.push(safeUser);
+        }
+      }
+    }));
 
-      const profileSnap = await db.ref(users/${user}).once("value");
-      return profileSnap.exists()
-        ? sanitizeUser(profileSnap.val())
-        : null;
-    });
-
-    const results = (await Promise.all(mutualChecks)).filter(Boolean);
-    res.json(results);
+    res.json(mutuals);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to fetch mutual contacts" });
   }
 });
 
-/* =====================================================
-   BASIC SUGGESTIONS (SANITIZED)
-   ===================================================== */
+// -----------------------
+// PEOPLE YOU MAY KNOW (Suggestions)
+// -----------------------
 router.get("/:username/suggestions", async (req, res) => {
-  const myUsername = req.params.username;
-
+  const username = req.params.username;
   try {
-    const usersSnap = await db.ref("users").once("value");
-    const followingSnap = await db.ref(followers/${myUsername}).once("value");
+    const followingSnap = await db.ref(followers/${username}).once("value");
+    const following = followingSnap.exists() ? Object.keys(followingSnap.val()) : [];
 
-    const users = usersSnap.val() || {};
-    const following = followingSnap.val() || {};
+    const usersSnap = await db.ref("users").once("value");
+    const users = usersSnap.exists() ? usersSnap.val() : {};
 
     const suggestions = Object.keys(users)
-      .filter(u => u !== myUsername && !following[u])
-      .map(u => sanitizeUser(users[u]));
+      .filter(u => u !== username && !following.includes(u))
+      .map(u => {
+        const { password, ...safeUser } = users[u];
+        return safeUser;
+      });
 
     res.json(suggestions);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to fetch suggestions" });
   }
 });
 
-/* =====================================================
-   ADVANCED SUGGESTIONS (FRIENDS OF FRIENDS)
-   SANITIZED + PARALLELIZED
-   ===================================================== */
-router.get("/:username/suggestions/advanced", async (req, res) => {
-  const myUsername = req.params.username;
+// -----------------------
+// STATUS HEARTBEAT
+// -----------------------
+router.post("/:username/status", async (req, res) => {
+  const username = req.params.username;
+  const { isOnline } = req.body;
+
+  if (typeof isOnline !== "boolean") return res.status(400).json({ error: "Missing/invalid isOnline" });
 
   try {
-    const myFollowingSnap = await db.ref(followers/${myUsername}).once("value");
-    const myFollowing = myFollowingSnap.val() || {};
-    const followingList = Object.keys(myFollowing);
-
-    const followerSnaps = await Promise.all(
-      followingList.map(user =>
-        db.ref(followers/${user}).once("value")
-      )
-    );
-
-    const suggestionSet = new Set();
-
-    followerSnaps.forEach(snap => {
-      const data = snap.val() || {};
-      Object.keys(data).forEach(candidate => {
-        if (candidate !== myUsername && !myFollowing[candidate]) {
-          suggestionSet.add(candidate);
-        }
-      });
+    await db.ref(users/${username}).update({
+      isOnline: !!isOnline,
+      lastSeen: Date.now(), // Timestamp for ghosting prevention
+      updatedAt: Date.now()
     });
-
-    const userSnaps = await Promise.all(
-      [...suggestionSet].map(u =>
-        db.ref(users/${u}).once("value")
-      )
-    );
-
-    const suggestions = userSnaps
-      .filter(s => s.exists())
-      .map(s => sanitizeUser(s.val()));
-
-    res.json(suggestions);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch advanced suggestions" });
-  }
-});
-
-/* =====================================================
-   UPDATE ONLINE STATUS
-   ===================================================== */
-router.post("/status", async (req, res) => {
-  const { username, isOnline } = req.body;
-
-  if (!username) {
-    return res.status(400).json({ error: "Missing username" });
-  }
-
-  try {
-    await db.ref(users/${username}/isOnline).set(!!isOnline);
     res.json({ success: true });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to update status" });
   }
 });
 
+// -----------------------
+// GET STATUS (including ghosting check)
+// -----------------------
+router.get("/:username/status", async (req, res) => {
+  try {
+    const snapshot = await db.ref(users/${req.params.username}).once("value");
+    if (!snapshot.exists()) return res.status(404).json({ error: "User not found" });
+
+    const { isOnline, lastSeen, password } = snapshot.val();
+    const now = Date.now();
+    const online = (isOnline && lastSeen && now - lastSeen < 60_000); // online only if lastSeen < 1 min
+    res.json({ isOnline: online, lastSeen });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch status" });
+  }
+});
+
 module.exports = router;
+
