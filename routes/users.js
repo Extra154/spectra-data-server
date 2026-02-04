@@ -3,27 +3,49 @@ const router = express.Router();
 const db = require("../firebaseService"); // admin.database()
 const bcrypt = require("bcryptjs");
 
+const ONLINE_TIMEOUT_MS = 60 * 1000; // 1 minute
+
+// -----------------------
+// HELPERS
+// -----------------------
+function sanitizeUser(user) {
+  if (!user) return null;
+  const { password, ...safeUser } = user;
+  return safeUser;
+}
+
+function isUserOnline(user) {
+  if (!user?.isOnline || !user?.lastSeen) return false;
+  return Date.now() - user.lastSeen < ONLINE_TIMEOUT_MS;
+}
+
 // -----------------------
 // CREATE OR UPDATE USER
 // -----------------------
 router.post("/", async (req, res) => {
-  const user = req.body; // Should match UserResponse fields
-  if (!user.username) return res.status(400).json({ error: "Missing username" });
+  const incomingUser = req.body;
+  if (!incomingUser.username) {
+    return res.status(400).json({ error: "Missing username" });
+  }
 
   try {
+    const user = { ...incomingUser };
+
     // Hash password if provided
     if (user.password) {
       const salt = await bcrypt.genSalt(10);
       user.password = await bcrypt.hash(user.password, salt);
     }
 
-    // Save or update user under users/{username}
-    await db.ref(users/${user.username}).update({
+    await db.ref(`users/${user.username}`).update({
       ...user,
-      updatedAt: Date.now(), // always update timestamp
+      updatedAt: Date.now(),
     });
 
-    res.json({ success: true, user: { ...user, password: undefined } });
+    res.json({
+      success: true,
+      user: sanitizeUser(user),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create/update user" });
@@ -35,12 +57,20 @@ router.post("/", async (req, res) => {
 // -----------------------
 router.get("/:username", async (req, res) => {
   try {
-    const snapshot = await db.ref(users/${req.params.username}).once("value");
-    if (!snapshot.exists()) return res.status(404).json({ error: "User not found" });
+    const snapshot = await db
+      .ref(`users/${req.params.username}`)
+      .once("value");
+
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
     const user = snapshot.val();
-    const { password, ...safeUser } = user;
-    res.json(safeUser);
+
+    res.json({
+      ...sanitizeUser(user),
+      isOnline: isUserOnline(user),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch user" });
@@ -52,10 +82,15 @@ router.get("/:username", async (req, res) => {
 // -----------------------
 router.post("/follow", async (req, res) => {
   const { follower, followed } = req.body;
-  if (!follower || !followed) return res.status(400).json({ error: "Missing follower/followed" });
+  if (!follower || !followed) {
+    return res.status(400).json({ error: "Missing follower/followed" });
+  }
 
   try {
-    await db.ref(followers/${follower}/${followed}).set(Date.now());
+    await db
+      .ref(`followers/${follower}/${followed}`)
+      .set(Date.now());
+
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -68,10 +103,15 @@ router.post("/follow", async (req, res) => {
 // -----------------------
 router.post("/unfollow", async (req, res) => {
   const { follower, followed } = req.body;
-  if (!follower || !followed) return res.status(400).json({ error: "Missing follower/followed" });
+  if (!follower || !followed) {
+    return res.status(400).json({ error: "Missing follower/followed" });
+  }
 
   try {
-    await db.ref(followers/${follower}/${followed}).remove();
+    await db
+      .ref(`followers/${follower}/${followed}`)
+      .remove();
+
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -84,7 +124,10 @@ router.post("/unfollow", async (req, res) => {
 // -----------------------
 router.get("/:username/following", async (req, res) => {
   try {
-    const snapshot = await db.ref(followers/${req.params.username}).once("value");
+    const snapshot = await db
+      .ref(`followers/${req.params.username}`)
+      .once("value");
+
     res.json(snapshot.val() || {});
   } catch (err) {
     console.error(err);
@@ -99,21 +142,37 @@ router.get("/:username/mutuals", async (req, res) => {
   const username = req.params.username;
 
   try {
-    const followingSnap = await db.ref(followers/${username}).once("value");
-    const following = followingSnap.exists() ? Object.keys(followingSnap.val()) : [];
+    const followingSnap = await db
+      .ref(`followers/${username}`)
+      .once("value");
 
-    // Check who follows me back
+    const following = followingSnap.exists()
+      ? Object.keys(followingSnap.val())
+      : [];
+
     const mutuals = [];
-    await Promise.all(following.map(async (f) => {
-      const theirFollowingSnap = await db.ref(followers/${f}/${username}).once("value");
-      if (theirFollowingSnap.exists()) {
-        const userSnap = await db.ref(users/${f}).once("value");
-        if (userSnap.exists()) {
-          const { password, ...safeUser } = userSnap.val();
-          mutuals.push(safeUser);
+
+    await Promise.all(
+      following.map(async (otherUser) => {
+        const followsBackSnap = await db
+          .ref(`followers/${otherUser}/${username}`)
+          .once("value");
+
+        if (followsBackSnap.exists()) {
+          const userSnap = await db
+            .ref(`users/${otherUser}`)
+            .once("value");
+
+          if (userSnap.exists()) {
+            const user = userSnap.val();
+            mutuals.push({
+              ...sanitizeUser(user),
+              isOnline: isUserOnline(user),
+            });
+          }
         }
-      }
-    }));
+      })
+    );
 
     res.json(mutuals);
   } catch (err) {
@@ -127,18 +186,29 @@ router.get("/:username/mutuals", async (req, res) => {
 // -----------------------
 router.get("/:username/suggestions", async (req, res) => {
   const username = req.params.username;
+
   try {
-    const followingSnap = await db.ref(followers/${username}).once("value");
-    const following = followingSnap.exists() ? Object.keys(followingSnap.val()) : [];
+    const followingSnap = await db
+      .ref(`followers/${username}`)
+      .once("value");
+
+    const following = followingSnap.exists()
+      ? Object.keys(followingSnap.val())
+      : [];
 
     const usersSnap = await db.ref("users").once("value");
     const users = usersSnap.exists() ? usersSnap.val() : {};
 
     const suggestions = Object.keys(users)
-      .filter(u => u !== username && !following.includes(u))
-      .map(u => {
-        const { password, ...safeUser } = users[u];
-        return safeUser;
+      .filter(
+        (u) => u !== username && !following.includes(u)
+      )
+      .map((u) => {
+        const user = users[u];
+        return {
+          ...sanitizeUser(user),
+          isOnline: isUserOnline(user),
+        };
       });
 
     res.json(suggestions);
@@ -155,14 +225,17 @@ router.post("/:username/status", async (req, res) => {
   const username = req.params.username;
   const { isOnline } = req.body;
 
-  if (typeof isOnline !== "boolean") return res.status(400).json({ error: "Missing/invalid isOnline" });
+  if (typeof isOnline !== "boolean") {
+    return res.status(400).json({ error: "Missing/invalid isOnline" });
+  }
 
   try {
-    await db.ref(users/${username}).update({
-      isOnline: !!isOnline,
-      lastSeen: Date.now(), // Timestamp for ghosting prevention
-      updatedAt: Date.now()
+    await db.ref(`users/${username}`).update({
+      isOnline,
+      lastSeen: Date.now(),
+      updatedAt: Date.now(),
     });
+
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -171,17 +244,24 @@ router.post("/:username/status", async (req, res) => {
 });
 
 // -----------------------
-// GET STATUS (including ghosting check)
+// GET STATUS (Ghost-proof)
 // -----------------------
 router.get("/:username/status", async (req, res) => {
   try {
-    const snapshot = await db.ref(users/${req.params.username}).once("value");
-    if (!snapshot.exists()) return res.status(404).json({ error: "User not found" });
+    const snapshot = await db
+      .ref(`users/${req.params.username}`)
+      .once("value");
 
-    const { isOnline, lastSeen, password } = snapshot.val();
-    const now = Date.now();
-    const online = (isOnline && lastSeen && now - lastSeen < 60_000); // online only if lastSeen < 1 min
-    res.json({ isOnline: online, lastSeen });
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = snapshot.val();
+
+    res.json({
+      isOnline: isUserOnline(user),
+      lastSeen: user.lastSeen || null,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch status" });
